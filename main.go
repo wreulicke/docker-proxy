@@ -9,18 +9,50 @@ import (
 )
 
 func main() {
-	ssh.Handle(func(sess ssh.Session) {
-		status, err := dockerExec(sess)
-		if err != nil {
-			fmt.Fprintln(sess, err)
-			log.Println(err)
-		}
-		sess.Exit(int(status))
-	})
+	server := ssh.Server{
+		Addr: ":2222",
+		LocalPortForwardingCallback: ssh.LocalPortForwardingCallback(func(ctx ssh.Context, host string, port uint32) bool {
+			ctx.SetValue("type", "local-port-forwarding")
+			log.Println("attempt to bind", host, port, "granted")
+			return true
+		}),
+		ReversePortForwardingCallback: ssh.ReversePortForwardingCallback(func(ctx ssh.Context, host string, port uint32) bool {
+			log.Println("attempt to bind", host, port, "granted")
+			ctx.SetValue("type", "remote-port-forwarding")
+			return true
+		}),
+		Handler: func(sess ssh.Session) {
+			log.Println(sess.Context().Value("type"))
+			if str, ok := sess.Context().Value("type").(string); ok {
+				if str == "local-port-forwarding" || str == "remote-port-forwarding" {
+					ctx := sess.Context()
+					for {
+						select {
+						case <-ctx.Done():
+							if err := ctx.Err(); err != nil {
+								log.Println(err)
+								sess.Exit(1)
+								return
+							}
+							sess.Close()
+							return
+						}
+					}
 
+				}
+			}
+			log.Println("remote local", sess.RemoteAddr(), sess.LocalAddr())
+			status, err := dockerExec(sess)
+			if err != nil {
+				fmt.Fprintln(sess, err)
+				log.Println(err)
+			}
+			sess.Exit(int(status))
+		},
+	}
 	log.Println("starting ssh server on port 2222...")
 	log.Println("you can try `$CONTAINER_ID@localhost -p 2222`")
-	log.Fatal(ssh.ListenAndServe(":2222", nil))
+	log.Fatal(server.ListenAndServe())
 }
 
 func dockerExec(sess ssh.Session) (status int, err error) {
